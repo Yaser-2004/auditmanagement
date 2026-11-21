@@ -1,0 +1,2 @@
+import{describe,it,expect}from'vitest';import{auditBusinessKey}from'../src/domain/audit-identity';
+describe('audit duplicate key',()=>{it('uses cycle, counsellor, stage and normalized call ID',()=>{expect(auditBusinessKey('cycle-1','counsellor-1','T1','  abc-123  ','hash-1')).toBe(auditBusinessKey('cycle-1','counsellor-1','T1','ABC-123','hash-2'));});it('uses the source hash only when no call ID exists',()=>{expect(auditBusinessKey('cycle-1','counsellor-1','Q1',null,'row-hash')).toContain('hash:row-hash');});});

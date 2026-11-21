@@ -1,0 +1,2 @@
+import{NextResponse}from'next/server';import{session}from'@/server/auth';import{db}from'@/lib/prisma';
+export async function POST(req:Request){const user=await session();if(user)await db.auditLog.create({data:{userId:user.id,action:'LOGOUT',entity:'User',entityId:user.id,details:{}}});const response=NextResponse.redirect(new URL('/login',req.url),303);response.cookies.set('ls_session','',{httpOnly:true,secure:process.env.NODE_ENV==='production',path:'/',maxAge:0,sameSite:'lax'});return response;}

@@ -1,0 +1,1 @@
+export function auditBusinessKey(cycleId:string,counsellorId:string,stage:string,callId:string|null,sourceHash:string){return`${cycleId}|${counsellorId}|${stage}|${callId?.trim()?`call:${callId.trim().toUpperCase()}`:`hash:${sourceHash}`}`;}

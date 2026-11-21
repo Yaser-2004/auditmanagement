@@ -1,0 +1,551 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoleName {
+  ADMIN
+  TRAINER
+  AUDITOR
+  COUNSELLOR
+  MANAGER
+}
+
+enum CycleStatus {
+  DRAFT
+  ACTIVE
+  IN_PROGRESS
+  COMPLETED
+  CLOSED
+}
+
+enum SourceSubmissionStatus {
+  RECEIVED
+  PROCESSED
+  NEEDS_REVIEW
+  FAILED
+  IGNORED
+}
+
+enum SyncRunStatus {
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+}
+
+enum CycleAccess {
+  VIEW
+  UPLOAD
+}
+
+enum Stage {
+  T1
+  Q1
+  Q2
+  T2
+  Q3
+  Q4
+}
+
+enum EvalStatus {
+  PASS
+  PARTIAL
+  FAIL
+  NA
+}
+
+enum AdoptionStatus {
+  CALCULATED
+  NEEDS_CONFIGURATION
+}
+
+model User {
+  id             String            @id @default(cuid())
+  email          String            @unique
+  name           String
+  passwordHash   String
+  employeeId     String?           @unique
+  phone          String?
+  role           RoleName          @default(MANAGER)
+  active         Boolean           @default(true)
+  mustChangePassword Boolean       @default(false)
+  createdAt      DateTime          @default(now())
+  imports        AuditImport[]
+  assignments    CycleAssignment[]
+  uploadedAudits Audit[]           @relation("AuditUploader")
+  createdCycles  AuditCycle[]      @relation("CycleCreator")
+  reviewedSubmissions SourceSubmission[] @relation("SubmissionReviewer")
+  resolvedEvaluatorSubmissions SourceSubmission[] @relation("SubmissionEvaluatorResolution")
+  counselorProfile Counsellor?     @relation("CounsellorLogin")
+  enrolledCycles CycleCounsellor[] @relation("CounsellorEnrollmentCreator")
+  assignedBy     CycleAssignment[] @relation("AssignmentAuthor")
+}
+
+model Team {
+  id               String            @id @default(cuid())
+  name             String            @unique
+  head             String?
+  counsellors      Counsellor[]
+  cycleAssignments CycleAssignment[]
+}
+
+model Counsellor {
+  id                String             @id @default(cuid())
+  name              String
+  email             String             @unique
+  employeeId        String?            @unique
+  phone             String?
+  active            Boolean            @default(true)
+  userId            String?            @unique
+  user              User?              @relation("CounsellorLogin", fields: [userId], references: [id], onDelete: SetNull)
+  manager           String?
+  teamId            String?
+  team              Team?              @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  audits            Audit[]
+  defectRegister    CumulativeDefect[]
+  adoptionSnapshots AdoptionSnapshot[]
+  cycleAssignments  CycleAssignment[]
+  cycleEnrollments  CycleCounsellor[]
+  cycles            AuditCycle[]
+  sourceSubmissions SourceSubmission[]
+  resolvedSourceSubmissions SourceSubmission[] @relation("SubmissionCounsellorResolution")
+
+  @@index([teamId, name])
+}
+
+model AuditCycle {
+  id                String             @id @default(cuid())
+  name              String
+  startsAt          DateTime
+  endsAt            DateTime?
+  status            CycleStatus        @default(DRAFT)
+  createdById       String?
+  updatedAt         DateTime           @updatedAt
+  counsellorId      String?
+  cycleNumber       Int?
+  completedAt       DateTime?
+  createdBy         User?              @relation("CycleCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  counsellor        Counsellor?        @relation(fields: [counsellorId], references: [id], onDelete: Restrict)
+  audits            Audit[]
+  imports           AuditImport[]
+  defectRegister    CumulativeDefect[]
+  adoptionSnapshots AdoptionSnapshot[]
+  assignments       CycleAssignment[]
+  participants      CycleCounsellor[]
+  sourceSubmissions SourceSubmission[]
+
+  @@unique([counsellorId, cycleNumber])
+}
+
+model CycleCounsellor {
+  id           String      @id @default(cuid())
+  cycleId      String
+  counsellorId String
+  enrolledById String?
+  enrolledAt   DateTime    @default(now())
+  active       Boolean     @default(true)
+  removedAt    DateTime?
+  cycle        AuditCycle  @relation(fields: [cycleId], references: [id], onDelete: Restrict)
+  counsellor   Counsellor  @relation(fields: [counsellorId], references: [id], onDelete: Restrict)
+  enrolledBy   User?       @relation("CounsellorEnrollmentCreator", fields: [enrolledById], references: [id], onDelete: SetNull)
+
+  @@unique([cycleId, counsellorId])
+  @@index([cycleId, active])
+}
+
+model CycleAssignment {
+  id           String      @id @default(cuid())
+  cycleId      String?
+  userId       String?
+  counsellorId String?
+  teamId       String?
+  access       CycleAccess @default(VIEW)
+  assignedAt   DateTime    @default(now())
+  assignedById String?
+  active       Boolean     @default(true)
+  endedAt      DateTime?
+  cycle        AuditCycle? @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  user         User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignedBy   User?       @relation("AssignmentAuthor", fields: [assignedById], references: [id], onDelete: SetNull)
+  counsellor   Counsellor? @relation(fields: [counsellorId], references: [id], onDelete: Cascade)
+  team         Team?       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([cycleId, userId, access])
+  @@index([cycleId, counsellorId])
+  @@index([cycleId, teamId])
+  @@index([cycleId, userId, counsellorId, active])
+}
+
+model AuditParameter {
+  id       String        @id
+  name     String
+  section  String
+  priority String
+  maxMarks Decimal       @db.Decimal(6, 2)
+  active   Boolean       @default(true)
+  results  AuditResult[]
+}
+
+model Audit {
+  id              String           @id @default(cuid())
+  counsellorId    String
+  cycleId         String
+  stage           Stage
+  auditor         String
+  auditDate       DateTime
+  scheduledAt     DateTime?
+  submittedAt     DateTime         @default(now())
+  callDate        DateTime?
+  callId          String?
+  callLink        String?
+  liveScore       Decimal?         @db.Decimal(8, 2)
+  totalMarks      Decimal?         @db.Decimal(8, 2)
+  calculatedScore Decimal?         @db.Decimal(8, 2)
+  scorePercent    Decimal?         @db.Decimal(8, 2)
+  details         Json
+  sourceRow       Json
+  sourceHash      String
+  businessKey     String           @unique
+  uploadedById    String?
+  importId        String?
+  sourceSubmissionId String?           @unique
+  isCurrent       Boolean          @default(true)
+  supersededAt    DateTime?
+  supersededById  String?
+  uploadedBy      User?            @relation("AuditUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
+  import          AuditImport?     @relation("CommittedImportAudits", fields: [importId], references: [id], onDelete: Restrict)
+  counsellor      Counsellor       @relation(fields: [counsellorId], references: [id])
+  cycle           AuditCycle       @relation(fields: [cycleId], references: [id], onDelete: Restrict)
+  results         AuditResult[]
+  importRows      AuditImportRow[]
+  sourceSubmission SourceSubmission? @relation(fields: [sourceSubmissionId], references: [id], onDelete: SetNull)
+  evaluatorEmail  String?
+  evaluatorRole   String?
+  sourceAuditId   String?
+  disputeStatus   String?
+  revisedScore    Decimal?          @db.Decimal(8, 4)
+
+  @@unique([counsellorId, cycleId, stage, sourceHash])
+  @@index([cycleId, stage, auditDate])
+  @@index([cycleId, counsellorId, isCurrent])
+}
+
+model AuditResult {
+  id              String         @id @default(cuid())
+  auditId         String
+  parameterId     String
+  status          EvalStatus
+  rawValue        String?
+  calculatedMarks Decimal?       @db.Decimal(8, 2)
+  audit           Audit          @relation(fields: [auditId], references: [id], onDelete: Cascade)
+  parameter       AuditParameter @relation(fields: [parameterId], references: [id])
+
+  @@unique([auditId, parameterId])
+  @@index([parameterId, status])
+}
+
+model AuditImport {
+  id              String             @id @default(cuid())
+  userId          String
+  stage           Stage
+  cycleId         String
+  fileName        String
+  fileHash        String
+  status          String             @default("PREVIEWED")
+  totalRows       Int                @default(0)
+  successRows     Int                @default(0)
+  failedRows      Int                @default(0)
+  duplicateRows   Int                @default(0)
+  createdAt       DateTime           @default(now())
+  user            User               @relation(fields: [userId], references: [id])
+  cycle           AuditCycle         @relation(fields: [cycleId], references: [id], onDelete: Restrict)
+  rows            AuditImportRow[]
+  errors          AuditImportError[]
+  committedAudits Audit[]            @relation("CommittedImportAudits")
+
+  @@unique([userId, fileHash])
+}
+
+model AuditImportRow {
+  id        String      @id @default(cuid())
+  importId  String
+  rowNumber Int
+  outcome   String
+  auditId   String?
+  raw       Json
+  errors    Json
+  audit     Audit?      @relation(fields: [auditId], references: [id], onDelete: SetNull)
+  import    AuditImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@unique([importId, rowNumber])
+}
+
+model AuditImportError {
+  id        String      @id @default(cuid())
+  importId  String
+  rowNumber Int?
+  field     String?
+  message   String
+  import    AuditImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+}
+
+model SyncRun {
+  id             String        @id @default(cuid())
+  status         SyncRunStatus @default(RUNNING)
+  startedAt      DateTime      @default(now())
+  finishedAt     DateTime?
+  fetchedCount   Int           @default(0)
+  processedCount Int           @default(0)
+  duplicateCount Int           @default(0)
+  reviewCount    Int           @default(0)
+  failedCount    Int           @default(0)
+  errorMessage   String?
+  submissions    SourceSubmission[]
+  errors         SyncError[]
+
+  @@index([startedAt])
+  @@index([status, startedAt])
+}
+
+model SourceSubmission {
+  id                    String                 @id @default(cuid())
+  sourceAuditId         String                 @unique
+  sourceSpreadsheetId   String
+  sourceSheetName       String
+  sourceRowReference    String?
+  payload               Json
+  payloadHash           String
+  sourceStageText       String?
+  detectedStage         Stage?
+  sourceRoleText        String?
+  normalizedRole        String?
+  evaluatorName         String?
+  evaluatorEmail        String?
+  counsellorEmail       String?
+  counsellorName        String?
+  auditDate             DateTime?
+  status                SourceSubmissionStatus @default(RECEIVED)
+  errorMessage          String?
+  fetchedAt             DateTime               @default(now())
+  processedAt           DateTime?
+  revision              Int                    @default(0)
+  resolvedStage         Stage?
+  resolvedRole          String?
+  resolvedCounsellorId  String?
+  resolutionReason      String?
+  reviewedById          String?
+  resolvedEvaluatorUserId String?
+  reviewedAt            DateTime?
+  cycleId               String?
+  counsellorId          String?
+  lastSyncRunId         String?
+  audit                 Audit?
+  cycle                 AuditCycle?            @relation(fields: [cycleId], references: [id], onDelete: SetNull)
+  counsellor            Counsellor?            @relation(fields: [counsellorId], references: [id], onDelete: SetNull)
+  resolvedCounsellor    Counsellor?            @relation("SubmissionCounsellorResolution", fields: [resolvedCounsellorId], references: [id], onDelete: SetNull)
+  reviewedBy            User?                  @relation("SubmissionReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  resolvedEvaluator     User?                  @relation("SubmissionEvaluatorResolution", fields: [resolvedEvaluatorUserId], references: [id], onDelete: SetNull)
+  lastSyncRun           SyncRun?               @relation(fields: [lastSyncRunId], references: [id], onDelete: SetNull)
+  revisions             SourceSubmissionRevision[]
+  errors                SyncError[]
+
+  @@index([status, fetchedAt])
+  @@index([counsellorId, cycleId])
+  @@index([lastSyncRunId])
+}
+
+model SourceSubmissionRevision {
+  id                 String           @id @default(cuid())
+  sourceSubmissionId String
+  revision           Int
+  payload            Json
+  payloadHash        String
+  capturedAt         DateTime          @default(now())
+  sourceSubmission   SourceSubmission  @relation(fields: [sourceSubmissionId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceSubmissionId, revision])
+}
+
+model SyncError {
+  id                 String           @id @default(cuid())
+  syncRunId          String
+  sourceSubmissionId String?
+  sourceRowReference String?
+  message            String
+  createdAt          DateTime          @default(now())
+  syncRun            SyncRun           @relation(fields: [syncRunId], references: [id], onDelete: Cascade)
+  sourceSubmission   SourceSubmission? @relation(fields: [sourceSubmissionId], references: [id], onDelete: SetNull)
+
+  @@index([syncRunId, createdAt])
+}
+
+model GoogleSheetsCredential {
+  id                    String   @id
+  accountEmail          String
+  refreshTokenCiphertext String
+  encryptionIv          String
+  encryptionTag         String
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+model GoogleSheetsSyncState {
+  id                String   @id
+  spreadsheetId     String
+  sheetName         String
+  cursorRow         Int      @default(0)
+  lastReconciledAt  DateTime?
+  leaseToken        String?
+  leaseExpiresAt    DateTime?
+  updatedAt         DateTime @updatedAt
+}
+
+model AdoptionStage {
+  id           String           @id @default(cuid())
+  counsellorId String
+  cycleId      String
+  stage        String
+  status       AdoptionStatus   @default(NEEDS_CONFIGURATION)
+  numerator    Int              @default(0)
+  denominator  Int              @default(0)
+  percentage   Decimal?         @db.Decimal(8, 2)
+  ruleVersion  Int
+  createdAt    DateTime         @default(now())
+  defects      AdoptionDefect[]
+
+  @@unique([counsellorId, cycleId, stage])
+}
+
+model AdoptionDefect {
+  id              String        @id @default(cuid())
+  adoptionStageId String
+  parameterId     String
+  classification  String
+  adoptionStage   AdoptionStage @relation(fields: [adoptionStageId], references: [id], onDelete: Cascade)
+
+  @@unique([adoptionStageId, parameterId, classification])
+}
+
+model PerformanceMetric {
+  id            String   @id @default(cuid())
+  counsellorId  String
+  cycleId       String
+  definitions   Json
+  a1Numerator   Int?
+  a1Denominator Int?
+  a1Percentage  Decimal? @db.Decimal(8, 2)
+  a1Status      String   @default("UNASSIGNED")
+  a2Numerator   Int?
+  a2Denominator Int?
+  a2Percentage  Decimal? @db.Decimal(8, 2)
+  a2Status      String   @default("UNASSIGNED")
+  a3Numerator   Int?
+  a3Denominator Int?
+  a3Percentage  Decimal? @db.Decimal(8, 2)
+  a3Status      String   @default("UNASSIGNED")
+  a4Numerator   Int?
+  a4Denominator Int?
+  a4Percentage  Decimal? @db.Decimal(8, 2)
+  a4Status      String   @default("UNASSIGNED")
+  avg1          Decimal? @db.Decimal(10, 3)
+  avg2          Decimal? @db.Decimal(10, 3)
+  delta         Decimal? @db.Decimal(10, 3)
+  status        String
+  createdAt     DateTime @default(now())
+
+  @@unique([counsellorId, cycleId])
+}
+
+model SLAViolation {
+  id           String    @id @default(cuid())
+  auditId      String?
+  cycleId      String
+  counsellorId String?
+  ruleVersion  Int
+  status       String
+  scheduledAt  DateTime?
+  submittedAt  DateTime?
+  delayHours   Decimal?  @db.Decimal(10, 2)
+  createdAt    DateTime  @default(now())
+}
+
+model AuditConfiguration {
+  id        String   @id @default(cuid())
+  key       String
+  version   Int
+  value     Json
+  confirmed Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@unique([key, version])
+}
+
+model CumulativeDefect {
+  id                String        @id @default(cuid())
+  counsellorId      String
+  cycleId           String
+  parameterId       String
+  status            String        @default("UNRESOLVED")
+  everRectified     Boolean       @default(false)
+  firstAuditId      String
+  latestAuditId     String
+  firstIdentifiedAt DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  counsellor        Counsellor    @relation(fields: [counsellorId], references: [id], onDelete: Cascade)
+  cycle             AuditCycle    @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  events            DefectEvent[]
+
+  @@unique([counsellorId, cycleId, parameterId])
+  @@index([cycleId, counsellorId, status])
+}
+
+model DefectEvent {
+  id        String           @id @default(cuid())
+  defectId  String
+  auditId   String
+  eventType String
+  auditDate DateTime
+  revision  Int              @default(0)
+  createdAt DateTime         @default(now())
+  defect    CumulativeDefect @relation(fields: [defectId], references: [id], onDelete: Cascade)
+
+  @@unique([defectId, auditId, revision])
+  @@index([auditId, eventType])
+}
+
+model AdoptionSnapshot {
+  id                String     @id @default(cuid())
+  counsellorId      String
+  cycleId           String
+  auditId           String
+  checkpoint        Stage
+  numerator         Int
+  denominator       Int
+  percentage        Decimal?   @db.Decimal(8, 2)
+  newDefects        Int
+  continuingDefects Int
+  rectifiedDefects  Int
+  recurringDefects  Int
+  revision          Int        @default(0)
+  createdAt         DateTime   @default(now())
+  counsellor        Counsellor @relation(fields: [counsellorId], references: [id], onDelete: Cascade)
+  cycle             AuditCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+
+  @@unique([counsellorId, cycleId, auditId, revision])
+  @@index([cycleId, checkpoint, createdAt])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  entity    String
+  entityId  String?
+  details   Json
+  createdAt DateTime @default(now())
+}
