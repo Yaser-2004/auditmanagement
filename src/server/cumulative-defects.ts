@@ -1,6 +1,7 @@
 import {db} from '@/lib/prisma';
 import {advanceDefectRegister,type DefectRecord,type Answer} from '@/domain/rules';
 import {calculateCheckpointMetric,calculatePerformanceSummary,PROPOSED_ADOPTION_CHECKPOINTS,type AdoptionMetricKey} from '@/domain/metrics';
+import {STAGES} from '@/domain/parameters';
 import type {Stage} from '@prisma/client';
 
 /** Replays cycle audits chronologically; immutable per-audit snapshots are only inserted when absent. */
@@ -33,7 +34,7 @@ export async function rebuildMappedMetrics(cycleId:string,counsellorIds:string[]
    db.adoptionSnapshot.findMany({where:{cycleId,counsellorId},orderBy:{revision:'desc'}}),
   ]);
   const metrics={} as Record<AdoptionMetricKey,ReturnType<typeof calculateCheckpointMetric>>;
-  for(const key of ['A1','A2','A3','A4'] as const){const checkpoint=mapping[key]??null;const audit=checkpoint?audits.find(a=>a.stage===checkpoint):undefined;const snapshot=audit?snapshots.find(s=>s.auditId===audit.id):undefined;metrics[key]=calculateCheckpointMetric(checkpoint,snapshot?{numerator:snapshot.numerator,denominator:snapshot.denominator}:null);}
+  for(const key of ['A1','A2','A3','A4'] as const){const checkpoint=mapping[key]??null;const audit=checkpoint?audits.find(a=>a.stage===checkpoint):undefined;const checkpointIndex=checkpoint?STAGES.indexOf(checkpoint):-1;const sequenceReady=checkpointIndex>=0&&STAGES.slice(0,checkpointIndex+1).every(stage=>audits.some(a=>a.stage===stage));const snapshot=audit&&sequenceReady?snapshots.find(s=>s.auditId===audit.id):undefined;metrics[key]=calculateCheckpointMetric(checkpoint,snapshot?{numerator:snapshot.numerator,denominator:snapshot.denominator}:null);}
   const summary=calculatePerformanceSummary(metrics);
   const data={definitions:{mapping,mappingConfirmed,version:config?.version??0,metrics},a1Numerator:metrics.A1.numerator,a1Denominator:metrics.A1.denominator,a1Percentage:metrics.A1.percentage,a1Status:metrics.A1.status,a2Numerator:metrics.A2.numerator,a2Denominator:metrics.A2.denominator,a2Percentage:metrics.A2.percentage,a2Status:metrics.A2.status,a3Numerator:metrics.A3.numerator,a3Denominator:metrics.A3.denominator,a3Percentage:metrics.A3.percentage,a3Status:metrics.A3.status,a4Numerator:metrics.A4.numerator,a4Denominator:metrics.A4.denominator,a4Percentage:metrics.A4.percentage,a4Status:metrics.A4.status,avg1:summary.avg1,avg2:summary.avg2,delta:summary.delta,status:summary.status};
   await db.performanceMetric.upsert({where:{counsellorId_cycleId:{counsellorId,cycleId}},create:{counsellorId,cycleId,...data},update:data});
