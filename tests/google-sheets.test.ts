@@ -1,6 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import { detectExplicitStage, detectSequenceStage, normalizeEvaluatorRole, parseGoogleSheetValues } from '../src/integrations/google-sheets/normalize';
 import { decryptGoogleRefreshToken, encryptGoogleRefreshToken } from '../src/integrations/google-sheets/oauth';
+import { authorizeGoogleSheetsCron } from '../src/server/google-sheets-cron-auth';
+
+describe('Google Sheets cron endpoint authentication', () => {
+  const secret = 'test-cron-secret-with-at-least-32-characters';
+
+  it('accepts the configured bearer token', () => {
+    expect(authorizeGoogleSheetsCron(`Bearer ${secret}`, secret)).toEqual({ ok: true });
+  });
+
+  it('rejects a missing authorization header with HTTP 401 metadata', () => {
+    expect(authorizeGoogleSheetsCron(null, secret)).toMatchObject({ ok: false, status: 401 });
+  });
+
+  it('rejects an invalid bearer token with HTTP 401 metadata', () => {
+    expect(authorizeGoogleSheetsCron('Bearer wrong-secret', secret)).toMatchObject({ ok: false, status: 401 });
+  });
+
+  it('fails closed with HTTP 500 metadata if the server secret is not configured', () => {
+    expect(authorizeGoogleSheetsCron(`Bearer ${secret}`, '')).toMatchObject({ ok: false, status: 500 });
+  });
+});
 
 describe('Google Sheets source normalization', () => {
   it('uses the compact second header row and preserves source fields and outcomes', () => {
