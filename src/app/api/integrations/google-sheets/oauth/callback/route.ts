@@ -2,7 +2,7 @@ import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/prisma';
 import { requireRole } from '@/server/auth';
-import { createGoogleOAuthClient, encryptGoogleRefreshToken, googleOAuthConfiguration, GOOGLE_OAUTH_STATE_COOKIE, GOOGLE_SHEETS_CREDENTIAL_ID } from '@/integrations/google-sheets/oauth';
+import { createGoogleOAuthClient, encryptGoogleRefreshToken, googleOAuthConfiguration, GOOGLE_OAUTH_STATE_COOKIE, GOOGLE_SHEETS_CREDENTIAL_ID, hasGoogleSheetsReadScope } from '@/integrations/google-sheets/oauth';
 
 const settingsPath = '/google-sheets';
 
@@ -35,7 +35,9 @@ export async function GET(request: Request) {
     const config = googleOAuthConfiguration();
     const auth = createGoogleOAuthClient();
     const { tokens } = await auth.getToken(code);
-    if (!tokens.refresh_token || !tokens.id_token) throw new Error('Google did not return the offline account credentials. Reconnect and approve the requested access.');
+    if (!tokens.id_token) throw new Error('Google did not return a verified account identity. The existing connection was left unchanged.');
+    if (!hasGoogleSheetsReadScope(tokens.scope)) throw new Error('Google did not grant the required read-only Sheets permission. The existing connection was left unchanged; reconnect and approve Google Sheets read-only access.');
+    if (!tokens.refresh_token) throw new Error('Google did not return an offline refresh token. The existing connection was left unchanged; retry the consent flow.');
     const ticket = await auth.verifyIdToken({ idToken: tokens.id_token, audience: config.clientId });
     const identity = ticket.getPayload();
     const email = identity?.email?.trim().toLowerCase();

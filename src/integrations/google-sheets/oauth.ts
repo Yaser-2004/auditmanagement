@@ -3,11 +3,16 @@ import { OAuth2Client } from 'google-auth-library';
 
 export const GOOGLE_SHEETS_CREDENTIAL_ID = 'default';
 export const GOOGLE_OAUTH_STATE_COOKIE = 'ls_google_oauth_state';
+export const GOOGLE_SHEETS_READ_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
 export const GOOGLE_OAUTH_SCOPES = [
   'openid',
   'email',
-  'https://www.googleapis.com/auth/spreadsheets.readonly',
+  GOOGLE_SHEETS_READ_SCOPE,
 ];
+
+export function hasGoogleSheetsReadScope(grantedScopes: string | undefined | null) {
+  return Boolean(grantedScopes?.split(/\s+/).includes(GOOGLE_SHEETS_READ_SCOPE));
+}
 
 export function googleOAuthConfiguration() {
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID?.trim();

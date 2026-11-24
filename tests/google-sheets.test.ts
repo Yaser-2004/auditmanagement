@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { detectExplicitStage, detectSequenceStage, normalizeEvaluatorRole, parseGoogleSheetValues } from '../src/integrations/google-sheets/normalize';
-import { decryptGoogleRefreshToken, encryptGoogleRefreshToken } from '../src/integrations/google-sheets/oauth';
+import { decryptGoogleRefreshToken, encryptGoogleRefreshToken, GOOGLE_OAUTH_SCOPES, GOOGLE_SHEETS_READ_SCOPE, hasGoogleSheetsReadScope } from '../src/integrations/google-sheets/oauth';
 import { authorizeGoogleSheetsCron } from '../src/server/google-sheets-cron-auth';
 
 describe('Google Sheets cron endpoint authentication', () => {
@@ -60,6 +60,19 @@ describe('Google Sheets source normalization', () => {
     const headers = ['Audit Date & Time', 'Auditor Role', 'Evaluator', 'Counsellor Name', 'Counsellor Email', '1A Outcome', 'Audit ID'];
     const parsed = parseGoogleSheetValues([headers, ['2026-11-03T06:42:10Z', 'QA', 'Dimple', 'Jatin', 'jatin@example.com', 'Pass', 'submission-81']], { sourceDataStartRow: 81 });
     expect(parsed.rows[0].sourceRowReference).toBe('81');
+  });
+});
+
+describe('Google Sheets OAuth read-only scope', () => {
+  it('requests spreadsheets.readonly without spreadsheet write access', () => {
+    expect(GOOGLE_OAUTH_SCOPES).toContain(GOOGLE_SHEETS_READ_SCOPE);
+    expect(GOOGLE_OAUTH_SCOPES).not.toContain('https://www.googleapis.com/auth/spreadsheets');
+  });
+
+  it('verifies the consent response granted the required read-only scope', () => {
+    expect(hasGoogleSheetsReadScope(`openid email ${GOOGLE_SHEETS_READ_SCOPE}`)).toBe(true);
+    expect(hasGoogleSheetsReadScope('openid email')).toBe(false);
+    expect(hasGoogleSheetsReadScope('https://www.googleapis.com/auth/spreadsheets')).toBe(false);
   });
 });
 
