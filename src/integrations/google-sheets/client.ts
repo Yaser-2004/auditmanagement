@@ -1,5 +1,6 @@
 import { db } from '@/lib/prisma';
 import { decryptGoogleRefreshToken, googleOAuthConfiguration, createGoogleOAuthClient, GOOGLE_SHEETS_CREDENTIAL_ID } from './oauth';
+import { GoogleSheetsIntegrationError, googleFailure } from './errors';
 import { googleSheetHeaderRow } from './normalize';
 
 export type GoogleSheetsConfiguration = {
@@ -49,10 +50,11 @@ export async function fetchConfiguredGoogleSheet() {
   const connections = await db.$queryRaw<Array<{ accountEmail: string; refreshTokenCiphertext: string; encryptionIv: string; encryptionTag: string }>>`SELECT "accountEmail", "refreshTokenCiphertext", "encryptionIv", "encryptionTag" FROM "GoogleSheetsCredential" WHERE "id" = ${GOOGLE_SHEETS_CREDENTIAL_ID} LIMIT 1`;
   const saved = connections[0];
   if (!saved) throw new Error('Connect the authorized Google account from the Admin Google Sheets page before syncing.');
-  if (saved.accountEmail.toLowerCase() !== config.expectedEmail) throw new Error(`The connected Google account is ${saved.accountEmail}; reconnect as ${config.expectedEmail}.`);
-  const refreshToken = decryptGoogleRefreshToken(saved);
+  if (saved.accountEmail.toLowerCase() !== config.expectedEmail) throw new GoogleSheetsIntegrationError('The stored Google account does not match GOOGLE_EXPECTED_ACCOUNT_EMAIL. Verify production configuration and connect the intended account there.', 'GOOGLE_CONNECTED_ACCOUNT_MISMATCH', 409);
+  const refreshToken = decryptSavedRefreshToken(saved);
   const auth = createGoogleOAuthClient();
   auth.setCredentials({ refresh_token: refreshToken });
+  await refreshGoogleAccessToken(auth);
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(config.spreadsheetId)}/values/${encodeURIComponent(config.range)}`;
   const response = await requestWithRetry<{ values?: unknown[][] }>(() => auth.request({
     url,
@@ -74,24 +76,44 @@ function rangePartsForIncrementalRead(range: string): RangeParts | null {
   return { prefix, startColumn: match[1].toUpperCase(), endColumn: (match[3] ?? match[1]).toUpperCase(), firstRow: Number(match[2] || 1), lastRow: match[4] ? Number(match[4]) : null };
 }
 
+function decryptSavedRefreshToken(saved: { refreshTokenCiphertext: string; encryptionIv: string; encryptionTag: string }) {
+  let token: string;
+  try { token = decryptGoogleRefreshToken(saved); }
+  catch { throw new GoogleSheetsIntegrationError('The stored Google credential could not be decrypted. Verify the production AUTH_SECRET matches the one used when this account was connected.', 'GOOGLE_CREDENTIAL_DECRYPTION_FAILED', 500); }
+  if (!token.trim()) throw new GoogleSheetsIntegrationError('The database contains a Google connection record without a refresh token. Reconnect the account from the deployed Admin page.', 'GOOGLE_REFRESH_TOKEN_MISSING', 503);
+  return token;
+}
+
+async function refreshGoogleAccessToken(auth: ReturnType<typeof createGoogleOAuthClient>) {
+  const response = await requestWithRetry(() => auth.getAccessToken().then(data => ({ data })), 'oauth_token_exchange');
+  if (!response.data.token) throw new GoogleSheetsIntegrationError('Google did not issue an access token for the stored refresh token.', 'GOOGLE_ACCESS_TOKEN_MISSING', 502);
+}
+
 function retryable(error: unknown) {
   const value = error as { code?: string; response?: { status?: number } };
   const status = value.response?.status;
   return status === undefined || status === 408 || status === 429 || status >= 500 || ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH'].includes(value.code ?? '');
 }
 
-async function requestWithRetry<T>(request: () => Promise<{ data: T }>) {
+async function requestWithRetry<T>(request: () => Promise<{ data: T }>, stage: 'oauth_token_exchange' | 'sheets_api' = 'sheets_api') {
   const configured = Number(process.env.GOOGLE_SYNC_MAX_RETRIES ?? 3);
   const maxRetries = Number.isFinite(configured) ? Math.max(0, Math.min(5, configured)) : 3;
   for (let attempt = 0; ; attempt++) {
     try { return await request(); }
     catch (error) {
-      const value = error as { code?: string; message?: string; response?: { status?: number } };
+      const value = error as { code?: string; response?: { status?: number } };
+      const failure = googleFailure(error, stage);
+      const diagnostics = failure?.diagnostics ?? { stage, httpStatus: value.response?.status ?? null, googleError: null, googleDescription: null };
       if (attempt >= maxRetries || !retryable(error)) {
-        if (attempt > 0) throw new Error(`Google Sheets API request failed after ${attempt + 1} attempts: ${value.message ?? String(error)}`);
-        throw error;
+        console.error('[google-sheets-sync] Google request failed', { attempt: attempt + 1, ...diagnostics });
+        if (failure) throw failure;
+        const code = typeof value.code === 'string' ? value.code : 'UNKNOWN';
+        if (['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH', 'ECONNREFUSED'].includes(code)) {
+          throw new GoogleSheetsIntegrationError('Could not reach Google. The sync can be retried.', 'GOOGLE_NETWORK_FAILURE', 503, diagnostics);
+        }
+        throw new GoogleSheetsIntegrationError('The Google request failed without a readable HTTP error response. Review the safe server diagnostic for its request stage and status.', 'GOOGLE_REQUEST_FAILED', 502, diagnostics);
       }
-      console.warn('[google-sheets-sync] Retrying transient Sheets API request', { attempt: attempt + 1, status: value.response?.status ?? null, code: value.code ?? null });
+      console.warn('[google-sheets-sync] Retrying transient Google request', { attempt: attempt + 1, ...diagnostics });
       await new Promise(resolve => setTimeout(resolve, Math.min(4000, 400 * (2 ** attempt))));
     }
   }
@@ -105,9 +127,10 @@ export async function fetchConfiguredGoogleSheetSince(cursorRow: number) {
   const connections = await db.$queryRaw<Array<{ accountEmail: string; refreshTokenCiphertext: string; encryptionIv: string; encryptionTag: string }>>`SELECT "accountEmail", "refreshTokenCiphertext", "encryptionIv", "encryptionTag" FROM "GoogleSheetsCredential" WHERE "id" = ${GOOGLE_SHEETS_CREDENTIAL_ID} LIMIT 1`;
   const saved = connections[0];
   if (!saved) throw new Error('Connect the authorized Google account from the Admin Google Sheets page before syncing.');
-  if (saved.accountEmail.toLowerCase() !== config.expectedEmail) throw new Error(`The connected Google account is ${saved.accountEmail}; reconnect as ${config.expectedEmail}.`);
+  if (saved.accountEmail.toLowerCase() !== config.expectedEmail) throw new GoogleSheetsIntegrationError('The stored Google account does not match GOOGLE_EXPECTED_ACCOUNT_EMAIL. Verify production configuration and connect the intended account there.', 'GOOGLE_CONNECTED_ACCOUNT_MISMATCH', 409);
   const auth = createGoogleOAuthClient();
-  auth.setCredentials({ refresh_token: decryptGoogleRefreshToken(saved) });
+  auth.setCredentials({ refresh_token: decryptSavedRefreshToken(saved) });
+  await refreshGoogleAccessToken(auth);
   const headerEndRow = Math.min(range.firstRow + 5, range.lastRow ?? range.firstRow + 5);
   const headerRange = `${range.prefix}${range.startColumn}${range.firstRow}:${range.endColumn}${headerEndRow}`;
   // The full scan cursor already includes the selected header row (including

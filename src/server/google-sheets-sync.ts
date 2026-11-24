@@ -6,6 +6,7 @@ import { defaultScoring, scoreAudit, type Answer } from '@/domain/rules';
 import { STAGE_WORKFLOW, validateStageTiming } from '@/domain/workflow';
 import { rebuildCumulativeDefects, rebuildMappedMetrics } from '@/server/cumulative-defects';
 import { fetchConfiguredGoogleSheet, fetchConfiguredGoogleSheetSince, googleSheetsConfiguration } from '@/integrations/google-sheets/client';
+import { googleConfigurationFailure } from '@/integrations/google-sheets/errors';
 import { normalizeStoredPayload, parseGoogleSheetValues, detectExplicitStage, detectSequenceStage, type EvaluatorRole, type SheetSubmission } from '@/integrations/google-sheets/normalize';
 
 const knownParameters = new Set<string>(PARAMETERS.map(([id]) => id));
@@ -322,9 +323,19 @@ export async function synchronizeGoogleSheet(trigger: 'MANUAL' | 'SCHEDULED' = '
     });
     return result;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const classified = googleConfigurationFailure(error);
+    const message = classified?.message ?? (error instanceof Error ? error.message : String(error));
+    console.error('[google-sheets-sync] Run failed', {
+      runId: run.id,
+      trigger,
+      code: classified?.code ?? 'GOOGLE_SYNC_FAILED',
+      httpStatus: classified?.diagnostics?.httpStatus ?? null,
+      google: classified?.diagnostics ?? null,
+      message: classified ? classified.message : 'Unclassified sync failure; inspect SyncRun and SyncError for sanitized run details.',
+    });
     await db.syncRun.update({ where: { id: run.id }, data: { status: 'FAILED', finishedAt: new Date(), errorMessage: message, failedCount: { increment: 1 } } });
-    await db.syncError.create({ data: { syncRunId: run.id, message } });
+    await db.syncError.create({ data: { syncRunId: run.id, message: classified ? `${classified.code}: ${message}${classified.diagnostics?.httpStatus ? ` (Google HTTP ${classified.diagnostics.httpStatus})` : ''}` : message } });
+    if (classified) throw classified;
     throw new Error(`Google Sheets sync failed: ${message}`);
   } finally {
     if (leaseAcquired) {
