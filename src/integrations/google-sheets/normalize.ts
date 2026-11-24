@@ -41,7 +41,7 @@ const fieldAliases: Record<string, string[]> = {
   stage: ['Audit Stage', 'Stage'],
 };
 
-function headerIndex(rows: unknown[][]): number {
+export function googleSheetHeaderRowIndex(rows: unknown[][]): number {
   const candidates = rows.slice(0, 6).map((row, index) => ({
     row,
     index,
@@ -96,7 +96,7 @@ function cell(row: unknown[], headers: string[], aliases: string[]): unknown {
 }
 
 export function parseGoogleSheetValues(values: unknown[][], options: { sourceDataStartRow?: number; sourceStartRow?: number } = {}): { sheetHeaderRow: number; rows: SheetSubmission[] } {
-  const headerRowIndex = headerIndex(values);
+  const headerRowIndex = googleSheetHeaderRowIndex(values);
   const headers = values[headerRowIndex].map(v => String(v ?? '').trim());
   const sourceDataStartRow = options.sourceDataStartRow ?? (options.sourceStartRow ?? 1) + headerRowIndex + 1;
   const rows: SheetSubmission[] = [];
@@ -155,7 +155,7 @@ export function parseGoogleSheetValues(values: unknown[][], options: { sourceDat
 }
 
 export function googleSheetHeaderRow(values: unknown[][]): unknown[] {
-  return values[headerIndex(values)];
+  return values[googleSheetHeaderRowIndex(values)];
 }
 
 export function normalizeStoredPayload(payload: Record<string, unknown>): SheetSubmission {

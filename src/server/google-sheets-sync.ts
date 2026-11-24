@@ -7,6 +7,7 @@ import { STAGE_WORKFLOW, validateStageTiming } from '@/domain/workflow';
 import { rebuildCumulativeDefects, rebuildMappedMetrics } from '@/server/cumulative-defects';
 import { fetchConfiguredGoogleSheet, fetchConfiguredGoogleSheetSince, googleSheetsConfiguration } from '@/integrations/google-sheets/client';
 import { googleConfigurationFailure } from '@/integrations/google-sheets/errors';
+import { committedGoogleSheetCursor } from '@/integrations/google-sheets/ranges';
 import { normalizeStoredPayload, parseGoogleSheetValues, detectExplicitStage, detectSequenceStage, type EvaluatorRole, type SheetSubmission } from '@/integrations/google-sheets/normalize';
 
 const knownParameters = new Set<string>(PARAMETERS.map(([id]) => id));
@@ -260,9 +261,11 @@ export async function synchronizeGoogleSheet(trigger: 'MANUAL' | 'SCHEDULED' = '
       ? await fetchConfiguredGoogleSheet()
       : await fetchConfiguredGoogleSheetSince(state.cursorRow);
     const incrementalDataStart = 'sourceDataStartRow' in source && typeof source.sourceDataStartRow === 'number' ? source.sourceDataStartRow : undefined;
-    const parsed = parseGoogleSheetValues(source.values, incrementalDataStart
-      ? { sourceDataStartRow: incrementalDataStart }
-      : { sourceStartRow: source.sourceStartRow ?? 1 });
+    const parsed = source.values.length
+      ? parseGoogleSheetValues(source.values, incrementalDataStart
+        ? { sourceDataStartRow: incrementalDataStart }
+        : { sourceStartRow: source.sourceStartRow ?? 1 })
+      : { sheetHeaderRow: 0, rows: [] as SheetSubmission[] };
     const rows = parsed.rows;
     let duplicateCount = 0, prevalidatedReviewCount = 0;
     const received = new Set<string>();
@@ -272,6 +275,9 @@ export async function synchronizeGoogleSheet(trigger: 'MANUAL' | 'SCHEDULED' = '
       if (saved.needsReview) prevalidatedReviewCount++;
       if (saved.queued) received.add(saved.submissionId);
     }
+    // Every newly fetched row now has a durable SourceSubmission record. Any later
+    // processing failure remains FAILED and is retried on the next run.
+    const fetchedRowsDurable = true;
     const retryableSubmissions = await db.sourceSubmission.findMany({
       where: { sourceSpreadsheetId: source.spreadsheetId, sourceSheetName: source.sheetName, status: { in: ['RECEIVED', 'FAILED'] } },
       select: { id: true },
@@ -312,16 +318,25 @@ export async function synchronizeGoogleSheet(trigger: 'MANUAL' | 'SCHEDULED' = '
       else failedCount++;
     }
     const status = failedCount || reviewCount ? (processedCount || reviewCount ? 'PARTIAL' : 'FAILED') : 'SUCCEEDED';
+    const priorCursor = state?.cursorRow ?? 0;
+    const mayAdvanceCursor = fetchedRowsDurable && failedCount === 0;
+    const nextCursor = committedGoogleSheetCursor(priorCursor, endRow, mayAdvanceCursor);
+    const errorMessage = failedCount
+      ? `${failedCount} source submission(s) failed processing. Cursor held at row ${priorCursor}; retryable rows remain durable and will be retried on the next sync.`
+      : reviewCount
+        ? `${reviewCount} source submission(s) need Admin review. They were durably retained; the cursor may advance.`
+        : null;
     const result = await db.$transaction(async tx => {
-      await tx.$executeRaw`
-        UPDATE "GoogleSheetsSyncState" SET "cursorRow" = GREATEST("cursorRow", ${endRow}),
-          "lastReconciledAt" = CASE WHEN ${reconcileDue || !source.incrementalSupported} THEN NOW() ELSE "lastReconciledAt" END,
+      const updatedState = await tx.$executeRaw`
+        UPDATE "GoogleSheetsSyncState" SET "cursorRow" = GREATEST("cursorRow", ${nextCursor}),
+          "lastReconciledAt" = CASE WHEN ${mayAdvanceCursor && (reconcileDue || !source.incrementalSupported)} THEN NOW() ELSE "lastReconciledAt" END,
           "updatedAt" = NOW()
         WHERE "id" = 'GOOGLE_SHEETS_MAIN' AND "leaseToken" = ${leaseToken}
       `;
-      return tx.syncRun.update({ where: { id: run.id }, data: { status, finishedAt: new Date(), processedCount, reviewCount, failedCount } });
+      if (updatedState !== 1) throw new Error('The sync lease was lost before the cursor commit. The cursor was not advanced; the next run will reconcile these rows.');
+      return tx.syncRun.update({ where: { id: run.id }, data: { status, finishedAt: new Date(), processedCount, reviewCount, failedCount, errorMessage } });
     });
-    return result;
+    return { ...result, cursorRow: nextCursor, cursorAdvanced: nextCursor > priorCursor, willRetryOnNextSync: failedCount > 0 };
   } catch (error) {
     const classified = googleConfigurationFailure(error);
     const message = classified?.message ?? (error instanceof Error ? error.message : String(error));

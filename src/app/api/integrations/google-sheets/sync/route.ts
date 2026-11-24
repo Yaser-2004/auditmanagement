@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { accessErrorResponse } from '@/server/auth';
 import { authorizeGoogleSheetsCron } from '@/server/google-sheets-cron-auth';
 import { GoogleSheetsIntegrationError } from '@/integrations/google-sheets/errors';
+import { googleSyncHttpStatus, googleSyncMessage } from '@/integrations/google-sheets/sync-outcome';
 import { synchronizeGoogleSheet } from '@/server/google-sheets-sync';
 
 async function scheduledSync(request: Request) {
@@ -9,7 +10,9 @@ async function scheduledSync(request: Request) {
   if (!authorization.ok) return NextResponse.json({ error: authorization.error }, { status: authorization.status });
   try {
     const run = await synchronizeGoogleSheet('SCHEDULED');
-    return NextResponse.json({ id: run.id, status: run.status, fetched: run.fetchedCount, processed: run.processedCount, duplicates: run.duplicateCount, needsReview: run.reviewCount, failed: run.failedCount });
+    const httpStatus = googleSyncHttpStatus(run);
+    const message = googleSyncMessage(run);
+    return NextResponse.json({ id: run.id, status: run.status, fetched: run.fetchedCount, processed: run.processedCount, duplicates: run.duplicateCount, needsReview: run.reviewCount, failed: run.failedCount, cursorRow: 'cursorRow' in run ? run.cursorRow : undefined, cursorAdvanced: 'cursorAdvanced' in run ? run.cursorAdvanced : false, willRetryOnNextSync: 'willRetryOnNextSync' in run ? run.willRetryOnNextSync : false, message, error: httpStatus >= 400 ? message : undefined }, { status: httpStatus });
   } catch (error) {
     if (error instanceof GoogleSheetsIntegrationError) {
       return NextResponse.json({ error: error.message, code: error.code, google: error.diagnostics }, { status: error.httpStatus });
